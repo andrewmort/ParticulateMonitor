@@ -5,9 +5,24 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include "sps30.h"
-#include "secrets.h"
 #include "ThingSpeak.h"
+#include <DNSServer.h>
+#include <ESP8266mDNS.h>
+#include "RemoteDebug.h"
 
+#include "secrets.h"
+/*
+ * // Contents of secrets.h
+ * #define SECRET_OTA_NAME     <ota_name>
+ * #define SECRET_OTA_PASS     <ota_password>
+ * #define SECRET_CH_ID        <thingspeak_channel>
+ * #define SECRET_WRITE_APIKEY <thingspeak_apikey>
+ */
+
+
+#define HOST_NAME "pmonitor"
+
+// Wifi manager
 WiFiManager wm;
 
 // Over the air update username and password
@@ -28,6 +43,9 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 #define SP30_COMMS Wire
 SPS30 sps30;
 
+// Remote debug
+RemoteDebug Debug;
+
 // Sensor readings
 float mass_pm1p0 = -1;
 float mass_pm2p5 = -1;
@@ -43,12 +61,28 @@ void setup() {
   // Start wifi in station mode
   WiFi.mode(WIFI_STA);
 
-  // Start serial port at 9600
+  // Start serial port
   Serial.begin(115200);
+
+  // Setup multicast DNS name
+  String hostNameWifi = HOST_NAME;
+  hostNameWifi.concat(".local");
+  WiFi.hostname(hostNameWifi);
+  if (MDNS.begin(HOST_NAME)) {
+      Serial.print("* MDNS responder started. Hostname -> ");
+      Serial.println(HOST_NAME);
+  }
+
+  // Setup remote debug
+  Debug.begin(HOST_NAME);         // Initialize the WiFi server
+  Debug.setResetCmdEnabled(true); // Enable the reset command
+  Debug.showProfiler(true);       // Enable time profiling
+  Debug.showColors(true);         // Enable olors
+  MDNS.addService("telnet", "tcp", 23);
 
   // Setup wifimanager in non-blocking mode
   wm.setConfigPortalBlocking(false);
-  wm.autoConnect("SetupParticulateMonitor");
+  wm.autoConnect("SetupPMonitor");
 
   // Setup OTA service
   startOTA();
@@ -63,14 +97,34 @@ void setup() {
   ThingSpeak.begin(client);
 }
 
+/*
+ * Proceedure:
+ *  - sleep sps30 for 5 minutes
+ *  - start sps30 measure mode for 30s to refresh
+ *  - take 30 measurements, one each second
+ *  - put sps30 back to sleep
+ *  - average measurements
+ *  - upload to thingspeak
+ *  - update display
+ *  - repeat
+ *
+ * Improvements
+ *  - better error handling (show on display)
+ *    * no wifi, keep taking measurements and updating display
+ *    * no sps30, make note on display, reattempt every 5 minutes
+ *  - countdown to next measurement (maybe a circle that gets filled in)
+ *  - web page with current measurement status, timer countdown, auto update button
+ *  - debug countdown to next reading info
+ */
+
 void loop() {
   unsigned long cur_millis;
 
-  // Process wifi manager
-  wm.process();
-
-  // Process OTA update
-  ArduinoOTA.handle();
+  // Handle library processing functions
+  Debug.handle();       // remote debug
+  wm.process();         // wifi manager
+  ArduinoOTA.handle();  // OTA update
+  yield();              // ESP processing time
 
   cur_millis = millis();
   if (cur_millis - prev_millis >= update_interval){
@@ -87,7 +141,6 @@ void loop() {
       update_thingspeak();
     }
   }
-
 }
 
 void startOLED() {
@@ -136,7 +189,7 @@ bool read_sps30(){
           ErrtoMess((char *) "Error during reading values: ",ret);
           return(false);
         }
-        Serial.println("Data not ready, wait 1s");
+        debugD("Data not ready, wait 1s\n");
         delay(1000);
     }
 
@@ -148,11 +201,7 @@ bool read_sps30(){
 
   } while (ret != SPS30_ERR_OK);
 
-  Serial.print(F("Update readings:  P2.5 = "));
-  Serial.print(val.MassPM2);
-  Serial.print(F("μg/m3,  Part Size = "));
-  Serial.print(val.PartSize);
-  Serial.println(F("μm"));
+  debugV("Update readings:  P2.5 = %fμg/m3,  Part Size = %fμm\n", val.MassPM2, val.PartSize);
 
   mass_pm1p0 = val.MassPM1;
   mass_pm2p5 = val.MassPM2;
@@ -160,7 +209,54 @@ bool read_sps30(){
   part_size = val.PartSize;
 
   new_reading = true;
+
+  if (Debug.isActive(Debug.INFO)) {
+    sps30_device_info();
+  }
+
   return true;
+
+}
+
+/**
+ * @brief : read and display device info
+ */
+void sps30_device_info() {
+  char buf[32];
+  uint8_t ret;
+  SPS30_version v;
+
+  //try to read serial number
+  ret = sps30.GetSerialNumber(buf, 32);
+  if (ret == SPS30_ERR_OK) {
+    debugI("Serial number : %s\n", buf);
+  }
+  else
+    ErrtoMess((char *) "could not get serial number", ret);
+
+  // try to get product name
+  ret = sps30.GetProductName(buf, 32);
+  if (ret == SPS30_ERR_OK)  {
+    debugI("Product name  : %s\n", buf);
+
+  }
+  else
+    ErrtoMess((char *) "could not get product name.", ret);
+
+  // try to get version info
+  ret = sps30.GetVersion(&v);
+  if (ret != SPS30_ERR_OK) {
+    debugI("Can not read version info\n");
+    return;
+  }
+
+  debugI("Firmware level: %u.%u\n", v.major, v.minor);
+
+  debugI("Hardware level: %u\n", v.HW_version);
+
+  debugI("SHDLC protocol: %u.%u\n", v.SHDLC_major, v.SHDLC_minor);
+
+  debugI("Library level : %u.%u\n", v.DRV_major, v.DRV_minor);
 }
 
 void update_display() {
@@ -203,10 +299,10 @@ void update_thingspeak() {
   ThingSpeak.setField(4, mass_pm10);
   int x = ThingSpeak.writeFields(myChannelNumber, myWriteAPIKey);
   if(x == 200){
-    Serial.println("Channel update successful.");
+    debugV("Channel update successful.\n");
   }
   else{
-    Serial.println("Problem updating channel. HTTP error code " + String(x));
+    debugE("Problem updating channel. HTTP error code %s\n", String(x));
   }
 }
 
