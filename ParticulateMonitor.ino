@@ -136,8 +136,10 @@ SPS30 sps30;
  * Fan relay
  ***************************************/
 
-#define RELAY_STATE_OFF 0
-#define RELAY_STATE_ON  1
+#define RELAY_PIN       12        // GPIO12 - D6
+
+#define RELAY_STATE_OFF 1
+#define RELAY_STATE_ON  0
 
 #define RELAY_TIME (30*60*1000)    // 30 minute for timer
 #define RELAY_TIME_DEBUG (30*1000) // 30 seconds for debug update
@@ -165,7 +167,8 @@ RemoteDebug Debug;
  *
  *********************************************************/
 void relay_init() {
-  // TODO setup pins
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, RELAY_STATE_OFF);
   relay_info.state = RELAY_STATE_OFF;
   relay_info.millis_last = 0;
   relay_info.millis_debug = millis();
@@ -178,7 +181,7 @@ void relay_process() {
 
   // Ensure fan is turned on when mass is above threshold
   if (particle_info.mass_pm2p5 > RELAY_THRESH_ON) {
-    //TODO turn on relay
+    digitalWrite(RELAY_PIN, RELAY_STATE_ON);
     relay_info.state = RELAY_STATE_ON;
     relay_info.millis_last = millis_cur;
     relay_info.is_countdown = false;
@@ -194,7 +197,7 @@ void relay_process() {
     }
 
     if (relay_info.is_countdown && (millis_cur - relay_info.millis_last > RELAY_TIME)) {
-      //TODO turn off relay
+      digitalWrite(RELAY_PIN, RELAY_STATE_OFF);
       relay_info.state = RELAY_STATE_OFF;
       relay_info.millis_last = millis_cur;
       relay_info.is_countdown = false;
@@ -339,7 +342,7 @@ void display_process() {
       display.setCursor(0, 5);
       display.setTextSize(2);
       display.print("FAN: ");
-      if (relay_info.state == RELAY_THRESH_ON) {
+      if (relay_info.state == RELAY_STATE_ON) {
         display.println("On");
         if (relay_info.is_countdown) {
           uint32_t count_min;
